@@ -1,0 +1,203 @@
+ENERGY BRAIN — DATA RESOURCES GUIDE
+======================================
+How every external dataset is used, what it costs, and what happens offline.
+Everything works with zero keys (synthetic fallback). Live data is layered in
+per-field, and every API response carries a `source` flag so the UI can label
+each number honestly ("live:nrel" vs "synthetic").
+
+Legend: [KEY] = needs a free/paid key in .env · [FREE] = no key, direct HTTP
+         [CACHED] = one-time download, then served from local cache.
+
+--------------------------------------------------------------------------------
+1. NREL NATIONAL SOLAR RADIATION DATABASE (NSRDB) — [KEY: NREL_API_KEY, free]
+--------------------------------------------------------------------------------
+What:      High-resolution (30-min / hourly, ~2-4 km) solar irradiance (GHI,
+           DNI, DHI) plus air temperature and wind speed, worldwide 1998-2023.
+Endpoint:  GET https://developer.nrel.gov/api/nsrdb/v2/solar/psm3-download.csv
+           ?wkt=POINT(lon lat)&names=2022&attributes=ghi,dhi,dni,air_temperature
+           ,wind_speed&interval=60&api_key=...
+Docs/keys: https://developer.nrel.gov/docs/solar/nsrdb/ — key is free, email
+           signup, rate-limited per key.
+How used:  `app/data/providers.py :: nrel_psm()` fetches the PSM v3 CSV for the
+           site and caches it 24 h (`.model_cache/live/`). It backs the *site
+           resource check* for solar studies and can calibrate the clear-sky
+           model. Without a key the physics clear-sky model is used instead.
+Fallback:  synthetic clear-sky x advected cloud transmission; note recorded in
+           `data_sources.irradiance`.
+Status in: Settings > Data sources ("NREL NSRDB"), regions/{id}/live.
+
+--------------------------------------------------------------------------------
+2. ELECTRICITY MAPS — [KEY: ELECTRICITY_MAPS_KEY, paid tiers / trial]
+--------------------------------------------------------------------------------
+What:      Real-time grid CO2 intensity (gCO2eq/kWh) and fossil-fuel share for
+           200+ zones, updated every ~15-60 min.
+Endpoint:  GET https://api.electricitymaps.com/v3/carbon-intensity/latest
+           ?zone=BD|DE|US-MIDA-PJM   Header: auth-token: <key>
+Docs/keys: https://api-portal.electricitymaps.com/ — commercial API with a
+           limited free trial; production use is paid.
+How used:  `electricitymaps_carbon()` feeds the region live bundle
+           (`GET /api/v1/regions/{id}/live` → carbon_g_per_kwh + carbon_source).
+           The VPP cost function and the Ledger CO2 math (marginal factor) can
+           then use measured intensity instead of the static profile factor.
+           Zones mapped: Dhaka->BD, Berlin->DE, PJM->US-MIDA-PJM.
+Fallback:  static per-region marginal/average factors in `app/core/regions.py`.
+
+--------------------------------------------------------------------------------
+3. OPEN POWER SYSTEM DATA (OPSD) — [FREE] + [CACHED one-time download]
+--------------------------------------------------------------------------------
+What:      Open, documented European power-system time series (German/EU TSO
+           load, wind/solar feed-in, day-ahead prices, 15/60-min resolution),
+           plus conventional plant lists. The flagship file used here:
+           time_series_60min_singleindex.csv (contains DE_load_actual_entsoe_
+           transparency among hundreds of columns).
+Endpoint:  https://data.open-power-system-data.org/time_series/2020-10-06/
+           time_series_60min_singleindex.csv  (no key; ~100 MB+ download)
+Docs:      https://open-power-system-data.org/ (data packages + Jupyter docs).
+How used:  `opsd_refresh()` downloads the package ONCE (explicit call only:
+           POST /api/v1/integrations/opsd-refresh — never automatic) and caches
+           the German load column (last 90 days of hours) locally. `de-berlin`
+           demand context then reports `live:opsd-cached` provenance; model
+           training still uses the built-in synthetic history so startup stays
+           instant and offline-safe.
+Fallback:  synthetic regional load shapes until the cache exists.
+
+--------------------------------------------------------------------------------
+4. NOAA GFS (GLOBAL FORECAST SYSTEM) — [FREE via Open-Meteo JSON mirror]
+--------------------------------------------------------------------------------
+What:      NOAA's global weather model (0.25 deg, hourly): cloud cover, short-
+           wave radiation, 2-m temperature — the raw input our solar model
+           wants. Raw NOMADS access is GRIB2 filter streams, e.g.
+           https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25_1hr.pl
+           (variables TCDC=total cloud cover, DSWRF=downward short-wave flux),
+           which need a GRIB2 decoder (pygrib/cfgrib + eccodes) and are awkward
+           for a hackathon backend.
+How used:  We pull the same GFS (blended with DWD ICON) through Open-Meteo's
+           free JSON API (see section 6): `hourly=cloud_cover,shortwave_
+           radiation,temperature_2m`. `forecast_solar()` blends the live cloud-
+           cover transmission 50/50 with the advected cloud-field model and
+           substitutes live temperature into the thermal derate. Response field
+           `data_sources.cloud` reads e.g. "live:openmeteo (Open-Meteo
+           GFS/ICON blend)". For a production hardening, swap `_get_json`
+           for a NOMADS GRIB2 fetch + decoder — the schema already supports any
+           `live:*` source string.
+Fallback:  pure advected synthetic cloud field + diurnal temperature model.
+
+--------------------------------------------------------------------------------
+5. PJM DATA MINER — [KEY: PJM_API_KEY, free subscription]
+--------------------------------------------------------------------------------
+What:      Real-time and historical load, LMP (locational marginal price),
+           generation mix and forecasts for the PJM Interconnection (US East,
+           65M+ people) — the canonical US wholesale-market dataset.
+Endpoint:  GET https://api.pjm.com/api/v1/load_frcstd_7_day
+           Header: Ocp-Apim-Subscription-Key: <key>
+           (Related: da_hrl_lmps / rt_hrl_lmps for day-ahead/real-time LMP.)
+Docs/keys: https://dataminer2.pjm.com/ — free account, subscribe to each feed,
+           key is rate-limited per subscription.
+How used:  `pjm_load_forecast()` returns the next ~168 hourly MW points for the
+           `us-pjm` region live bundle (`load.source = live:pjm`), grounding
+           the demand context in the actual PJM forecast. LMP endpoints are
+           documented for tariff calibration but load is the wired feed.
+Fallback:  synthetic PJM-shaped commercial load (afternoon peak 14-19h).
+
+--------------------------------------------------------------------------------
+6. OPEN-METEO FORECAST API — [FREE, no key]  (extra free resource)
+--------------------------------------------------------------------------------
+What:      Free JSON weather/solar forecast aggregating NOAA GFS, DWD ICON,
+           ECMWF IFS and others: cloud_cover, shortwave_radiation,
+           temperature_2m, hourly, 16-day horizon. No key, generous limits.
+Endpoint:  GET https://api.open-meteo.com/v1/forecast?latitude=..&longitude=..
+           &hourly=temperature_2m,cloud_cover,shortwave_radiation
+           &forecast_days=3&timezone=auto
+Docs:      https://open-meteo.com/en/docs
+How used:  Primary live weather route for ALL regions (Dhaka/Berlin/PJM):
+           cloud transmission blend + temperature derate in solar, `met_now`
+           in the region live bundle. Cached 1 h.
+
+--------------------------------------------------------------------------------
+7. NASA POWER (Prediction Of Worldwide Energy Resources) — [FREE, no key]
+--------------------------------------------------------------------------------
+What:      NASA hourly solar irradiance (ALLSKY_SFC_SW_DWN) + 2-m temperature,
+           global 0.5-deg grid, 1981-present with a few days latency. Ideal
+           free "ground truth" for solar resource assessment.
+Endpoint:  GET https://power.larc.nasa.gov/api/temporal/hourly/point
+           ?parameters=ALLSKY_SFC_SW_DWN,T2M&community=RE&latitude=..&longitude=..
+           &start=YYYYMMDD&end=YYYYMMDD&format=JSON
+Docs:      https://power.larc.nasa.gov/docs/ (also /docs/services/api/)
+How used:  `nasa_power()` is the irradiance fallback when no NREL key exists:
+           region bundle `irradiance.source = live:nasapower`. Cached 12 h.
+
+--------------------------------------------------------------------------------
+8. CARBON INTENSITY UK (National Grid ESO) — [FREE, no key]
+--------------------------------------------------------------------------------
+What:      Real-time + 48 h forecast GB grid carbon intensity (gCO2/kWh) with
+           generation mix, from National Grid ESO. Completely open.
+Endpoint:  GET https://api.carbonintensity.org.uk/intensity
+Docs:      https://carbonintensity.org.uk/ (API docs on site)
+How used:  Free live carbon number; used as the honestly-labelled EU proxy for
+           `de-berlin` when no Electricity Maps key is set
+           (`note: "...Used as EU proxy for Berlin (GB grid)."`).
+
+--------------------------------------------------------------------------------
+9. US EIA OPEN DATA v2 — [KEY: EIA_API_KEY, free]
+--------------------------------------------------------------------------------
+What:      US Energy Information Administration: hourly balancing-authority
+           load, interchange, and generation by fuel type (RTO fuel-type-data),
+           plus forecasts. Key is free and instant.
+Endpoint:  GET https://api.eia.gov/v2/electricity/rto/fuel-type-data/data/
+           ?frequency=hourly&facets[respondent][]=ERCO&facets[fueltype][]=WND
+           &api_key=...
+Docs/keys: https://www.eia.gov/opendata/ — register an email, key by return mail.
+How used:  `eia_texas_wind_hourly()` (ERCOT wind, 48 h) demonstrates the feed;
+           wired as US renewable-generation context. Extend the same pattern to
+           any BA/fuel (e.g. PJM coal/gas) for live fuel-mix CO2 math.
+
+--------------------------------------------------------------------------------
+10. ENTSO-E TRANSPARENCY PLATFORM — [KEY: ENTSOE_API_KEY, free]
+--------------------------------------------------------------------------------
+What:      Official EU TSO data: day-ahead prices, actual/forecast load and
+           wind/solar per bidding zone, cross-border flows (XML/REST API).
+Docs/keys: https://transparency.entsoe.eu/ — free registration, key via email.
+How used:  Status-tracked (`entsoe_status()`) and documented for production
+           EU price/load wiring; synthetic EU shapes until the key is set. The
+           provider slot, cache key and `live:entsoe` source string already
+           exist, so wiring a `fetch_day_ahead_prices(zone)` follows the same
+           20-line pattern as the EIA provider.
+
+--------------------------------------------------------------------------------
+11. ASSISTANT LLM (OpenAI / Anthropic) — [KEY, paid]  (explanation only)
+--------------------------------------------------------------------------------
+What:      Optional wording refinement for the Grid Copilot's answers.
+How used:  RAG retrieval + rule-based explainer is the default and is always
+           cited (doc + simulation step). A key only polishes phrasing — the
+           LLM never issues control actions (human-in-the-loop badge).
+
+--------------------------------------------------------------------------------
+CACHING, PROVENANCE & OFFLINE RULES (applies to all of the above)
+--------------------------------------------------------------------------------
+* Cache: `.model_cache/live/*.json` (+ `opsd_de_load.json`), TTLs 1 h (weather/
+  carbon) to 24 h (irradiance) to 7 days (OPSD). Repeated calls and restarts
+  are instant and survive network loss; cached payloads are labelled
+  `live:<provider>-cached`.
+* Provenance: every provider returns `{"source": "live:x" | "synthetic",
+  "note": "..."}`. Solar responses add `data_sources: {cloud, temperature,
+  irradiance}`; regions add `/live` bundle; Settings page renders each row
+  with its detail + cache timestamp. Nothing is ever presented as live when
+  it is not.
+* Failure: any exception (timeout, bad key, schema change) → synthetic
+  fallback with the reason in `note`. Timeouts: 6 s JSON, 15-30 s CSV, 300 s
+  only for the explicit OPSD download.
+* Tests: `ENERGY_BRAIN_OFFLINE=1` forces synthetic with zero network access
+  (`backend/tests/test_providers.py`); all 21 backend tests pass offline.
+* Keys: copy `.env.example` → `.env` and fill in. Free instant keys: NREL,
+  EIA, ENTSO-E, PJM subscription. Free keyless: Open-Meteo, NASA POWER,
+  Carbon Intensity UK, OPSD. Paid/trial: Electricity Maps, OpenAI/Anthropic.
+
+QUICK START
+-----------
+1. Keyless live data (recommended first step — no signup):
+   Start backend, then POST /api/v1/integrations/refresh (or Settings >
+   "Refresh live data"). Open-Meteo, NASA POWER and CI-UK will flip to live;
+   re-run a solar forecast and see data_sources.cloud = live:openmeteo.
+2. NREL: set NREL_API_KEY → site irradiance checks go live.
+3. OPSD: POST /api/v1/integrations/opsd-refresh once → Berlin load = live.
+4. PJM/EIA/ENTSO-E/ElectricityMaps: set keys → region bundles go live.

@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# Node / frontend build
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Logs
+*.log
+backend/eb_*.log
+frontend/eb_*.log
+
+# Local runtime data (recreated automatically)
+*.db
+*.sqlite
+.model_cache/
+live/
+
+# Secrets (commit only .env.example)
+.env
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
