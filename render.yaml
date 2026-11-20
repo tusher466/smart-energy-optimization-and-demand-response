@@ -1,6 +1,8 @@
-# Render Blueprint: single web service (API + built SPA) + managed Postgres.
+# Render Blueprint: single web service (API + built SPA) + managed Postgres
+# + 5 standalone static ad sites (one per role + problem page).
 # Deploy: push this repo to GitHub, then Render Dashboard -> New -> Blueprint,
 # select the repo, confirm, and Render provisions everything below.
+# Afterwards, any push auto-syncs; or press "Manual sync" on the Blueprint page.
 services:
   - type: web
     name: smart-energy-brain
@@ -18,6 +20,55 @@ services:
         fromDatabase:
           name: energy-brain-db
           property: connectionString
+
+  # ---- Standalone ad landing pages (pure static, no build step) ----
+  # Each site serves the whole ad/ folder; the rewrite makes its own page
+  # the root URL, so the 5 sites behave as 5 independent websites.
+  - type: static
+    name: ad-problem
+    rootDir: ad
+    buildCommand: echo "static site - nothing to build"
+    staticPublishPath: .
+    routes:
+      - type: rewrite
+        source: /
+        destination: /problem.html
+  - type: static
+    name: ad-admin
+    rootDir: ad
+    buildCommand: echo "static site - nothing to build"
+    staticPublishPath: .
+    routes:
+      - type: rewrite
+        source: /
+        destination: /admin.html
+  - type: static
+    name: ad-operator
+    rootDir: ad
+    buildCommand: echo "static site - nothing to build"
+    staticPublishPath: .
+    routes:
+      - type: rewrite
+        source: /
+        destination: /operator.html
+  - type: static
+    name: ad-manager
+    rootDir: ad
+    buildCommand: echo "static site - nothing to build"
+    staticPublishPath: .
+    routes:
+      - type: rewrite
+        source: /
+        destination: /manager.html
+  - type: static
+    name: ad-viewer
+    rootDir: ad
+    buildCommand: echo "static site - nothing to build"
+    staticPublishPath: .
+    routes:
+      - type: rewrite
+        source: /
+        destination: /viewer.html
 
 databases:
   - name: energy-brain-db
