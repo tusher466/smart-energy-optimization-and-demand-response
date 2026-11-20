@@ -1,0 +1,11 @@
+# Keep the Docker build context small (node_modules alone is hundreds of MB).
+node_modules/
+frontend/node_modules/
+frontend/dist/
+.git/
+*.log
+*.db
+__pycache__/
+.pytest_cache/
+.model_cache/
+.env
